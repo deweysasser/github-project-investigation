@@ -15,3 +15,4 @@ create an index of all commits on each PR and leave them in the `manifests` dire
 
 It will then summarize the PRs and print the top contributors.
 
+The resulting (bare) git repository will be left with a branch for each PR.
