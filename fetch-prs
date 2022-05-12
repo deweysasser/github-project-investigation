@@ -1,0 +1,118 @@
+#!/bin/bash
+set -ueo pipefail
+
+# Purpose:  This script is meant to fetch a code base an all PRs for a given repo.
+
+# Usage: fetch-prs git@github.com:juanluisbaptiste/docker-postfix.git
+
+## usage - show usage for program
+usage() {
+  cat << EOF
+  $0 -- clone a repository and all PRs currently open, recording manifests of those PRs
+  WARNING:  on large repositories with a lot of PRs, this could take a while.
+
+  Usage: $0 REPO
+
+  REPO should be a cloneable Github URL
+EOF
+}
+
+## log -- runs git log with the proper format.  Arguments passed will be the commit set to log
+log() {
+  git log --pretty=tformat:'%H %ae "%an" %s' "$@"
+}
+
+## run DESC [CMD...] -- shows DESC on stderr, runs command, prints a status.  Exits if error
+run() {
+  desc="$1"
+  shift
+  echo -n "$desc..." >&2
+  if "$@" ; then
+    echo "DONE" >&2
+  else
+    echo "FAILED" >&2
+    exit 3
+  fi
+}
+
+## message -- pass all arguments through to 'echo', but put output on stderr
+message() {
+  echo "$@" >&2
+}
+
+if [ $# -lt 1 ] ; then
+  usage
+  exit 1
+fi
+
+if [ -z "$(which gh)" ] ; then
+  # shellcheck disable=SC2016
+  echo 'Missing `gh` tool'
+  echo "please install per https://cli.github.com"
+  exit 2
+fi
+
+remoteRepo="$1"
+prCount="${2:-10000}"
+
+
+# Ensure a local repository
+localRepo=$(basename "$remoteRepo")
+
+if [ ! -d "$localRepo" ]; then
+  run "Cloning $remoteRepo" git clone --bare "$remoteRepo" "$localRepo"
+fi
+
+prList=manifests/PRList.txt
+
+# Get the list of PRs
+(
+  cd "$localRepo"
+  run "Listing up to $prCount PRs" gh pr list -L "$prCount"
+) > "$prList"
+
+prFoundCount=$( wc -l < "${prList}")
+
+echo "Found $prFoundCount PRs"
+
+mkdir -p manifests
+
+export GIT_DIR="$localRepo"
+
+#git --git-dir "$localRepo" config remote.origin.fetch "+refs/pull/*/head:refs/remotes/origin/pr/*"
+
+message  -n "Adding PRs refs to local repository"
+# Get all the PRs into the local tree
+git  config --unset-all remote.origin.fetch
+
+for pr in $(awk '{print $1}' "$prList" | tr -d \# ); do
+  message -n .
+  git  config --add remote.origin.fetch "+refs/pull/${pr}/head:refs/remotes/origin/pr/${pr}"
+done
+
+message DONE
+
+run "Fetching remote commits" git  fetch -q origin
+
+message -n "Adding PR branches and calculating logs..."
+# Now make branches for all the PRs
+for pr in $(awk '{print $1}' "$prList" | tr -d \# ); do
+  listFile="manifests/pr-${pr}.txt"
+  if [ ! -f "$listFile" ] ; then
+   message -n .
+   git update-ref "refs/heads/pr/${pr}" "refs/remotes/origin/pr/${pr}"
+   log "$(git merge-base "pr/${pr}" HEAD)..pr/${pr}" > "$listFile"
+  fi
+done
+
+message DONE
+
+# Concatenate the manifests and generate a summary
+
+message "Calculating contributors"
+# shellcheck disable=SC2016
+find manifests -name "pr-*.txt" | xargs awk '{print $2}' | grep -v -E 'k8s-.*-robot@users.noreply.github.com' | sort | uniq -c | sort -rn > manifests/CommitCountByEmail.txt
+
+echo "Top contributors"
+echo "#Commits    Email"
+head manifests/CommitCountByEmail.txt
